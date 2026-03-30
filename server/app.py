@@ -42,8 +42,12 @@ env_state = {
 
 # 3. API Endpoints
 @app.post("/reset")
-def reset(task_id: str):
+def reset(task_id: str = "task_refund"):
     global env_state
+    
+    if not task_id:
+        task_id = "task_refund"
+
     env_state = {
         "current_task": task_id,
         "step_count": 0,
