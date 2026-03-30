@@ -1,0 +1,16 @@
+name: "helpdesk_support"
+version: "1.0.0"
+description: "An environment where an agent acts as a Level 1 Support Engineer managing tickets and billing operations."
+entrypoint: "server.app:app"
+port: 7860
+
+tasks:
+  - id: "task_refund"
+    difficulty: "easy"
+    description: "Successfully categorize and issue a full refund for a standard duplicate charge request."
+  - id: "task_reject_outdated"
+    difficulty: "medium"
+    description: "Deny a refund based on company policy (outside 30-day window) and reply politely."
+  - id: "escalation"
+    difficulty: "hard"
+    description: "Handle a multi-turn angry customer, do NOT issue a refund for damages, and escalate to humans."
