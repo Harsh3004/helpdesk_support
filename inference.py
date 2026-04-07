@@ -15,24 +15,23 @@ except ImportError:
     pass
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Meta-Llama-3-8B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN")
+
 ENV_URL = os.getenv("ENV_URL", "http://127.0.0.1:7860")
 
 def run_task(task_id: str, client: OpenAI):
-    print(f"\n{'='*40}\nStarting Task: {task_id}\n{'='*40}")
+    print(f"START {task_id}")
     
     try:
         req = urllib.request.Request(f"{ENV_URL}/reset?task_id={task_id}", method="POST")
         with urllib.request.urlopen(req) as response:
             res = json.loads(response.read().decode('utf-8'))
     except Exception as e:
-        print(f"Connection Error. Is the FastAPI server running? Error: {e}")
+        print(f"Error: Could not connect to environment. {e}")
         return
 
     ticket_content = res.get("ticket_content", "")
-    print(f"CUSTOMER TICKET: {ticket_content}\n")
-    
     done = False
     step = 0
     history = []
@@ -68,33 +67,21 @@ def run_task(task_id: str, client: OpenAI):
             if "args" not in action_data:
                 action_data["args"] = {}
                 
-        except Exception as e:
-            print(f"LLM Error: {e}")
-            action_data = {"command": "reply", "args": {"text": "System error. Please hold."}}
+        except Exception:
+            action_data = {"command": "reply", "args": {"text": "System error."}}
             
-        print(f"Step {step} - Agent Action: {action_data['command']}")
-        if action_data['command'] == 'reply':
-            print(f"Agent Reply Text: {action_data.get('args', {}).get('text', '')}")
+        print(f"STEP {step} Action: {action_data['command']}")
         
         try:
             data = json.dumps(action_data).encode('utf-8')
             req = urllib.request.Request(f"{ENV_URL}/step", data=data, headers={'Content-Type': 'application/json'}, method="POST")
             with urllib.request.urlopen(req) as response:
                 step_res = json.loads(response.read().decode('utf-8'))
-        except urllib.error.HTTPError as e:
-            print(f"\nCRITICAL ERROR: Local Server returned an HTTP Error.")
-            print(f"Status Code: {e.code}")
-            print(f"Raw Output: {e.read().decode('utf-8')}")
-            break
-        except json.decoder.JSONDecodeError:
-            print(f"\nCRITICAL ERROR: Local Server returned an invalid response.")
-            break
-        except Exception as e:
-            print(f"\nAPI Error: {e}")
+        except Exception:
+            print("Error: Step failed.")
             break
         
         if "reward" not in step_res:
-            print(f"\nAPI Error from Server: {step_res}")
             break
             
         reward = step_res["reward"]
@@ -104,11 +91,9 @@ def run_task(task_id: str, client: OpenAI):
         
         history.append(f"Used '{action_data['command']}'. Result: {system_msg}")
         
-    print(f"\nTask {task_id} Finished.")
-    print(f"Final Status: {step_res.get('info', {}).get('ticket_status', 'unknown')}")
-    print(f"Final Score: {total_reward} / 1.0")
+    print(f"END {task_id} Score: {total_reward}")
 
 if __name__ == "__main__":
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
     for t in ["task_refund", "task_reject_outdated", "escalation"]:
         run_task(t, client)
