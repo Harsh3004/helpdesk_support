@@ -1,12 +1,11 @@
 """
-Inference Script for Helpdesk Support Environment
+Inference Script for Helpdesk Support Environment - Zero Dependency Version
 """
 
 import os
 import json
 import urllib.request
 import urllib.error
-from openai import OpenAI
 
 try:
     from dotenv import load_dotenv
@@ -20,15 +19,45 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 ENV_URL = os.getenv("ENV_URL", "http://127.0.0.1:7860")
 
-def run_task(task_id: str, client: OpenAI):
+def call_llm_api(prompt: str) -> str:
+    url = f"{API_BASE_URL}/chat/completions"
+    
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if HF_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_TOKEN}"
+        
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": "You are a logical AI support agent. Always output valid JSON."},
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {"type": "json_object"}
+    }
+    
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            return result['choices'][0]['message']['content']
+    except Exception as e:
+        print(f"LLM API Error: {e}")
+        return ""
+
+def run_task(task_id: str):
     print(f"START {task_id}")
     
     try:
         req = urllib.request.Request(f"{ENV_URL}/reset?task_id={task_id}", method="POST")
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             res = json.loads(response.read().decode('utf-8'))
     except Exception as e:
-        print(f"Error: Could not connect to environment. {e}")
+        print(f"Error: Could not connect to environment for {task_id}. {e}")
+        print(f"END {task_id} Score: 0.0")
         return
 
     ticket_content = res.get("ticket_content", "")
@@ -51,49 +80,44 @@ def run_task(task_id: str, client: OpenAI):
             f"Respond STRICTLY in JSON format: {{\"command\": \"action_name\", \"args\": {{\"text\": \"your message\"}}}}"
         )
         
+        response_text = call_llm_api(prompt)
+        
         try:
-            completion = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": "You are a logical AI support agent. Always output valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
-            response_text = completion.choices[0].message.content
             response_text = response_text.replace("```json", "").replace("```", "").strip()
             action_data = json.loads(response_text)
             
             if "args" not in action_data:
                 action_data["args"] = {}
-                
         except Exception:
             action_data = {"command": "reply", "args": {"text": "System error."}}
             
-        print(f"STEP {step} Action: {action_data['command']}")
+        print(f"STEP {step} Action: {action_data.get('command', 'unknown')}")
         
         try:
             data = json.dumps(action_data).encode('utf-8')
             req = urllib.request.Request(f"{ENV_URL}/step", data=data, headers={'Content-Type': 'application/json'}, method="POST")
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=10) as response:
                 step_res = json.loads(response.read().decode('utf-8'))
-        except Exception:
-            print("Error: Step failed.")
-            break
-        
-        if "reward" not in step_res:
-            break
+                
+            if "reward" not in step_res:
+                break
+                
+            reward = step_res["reward"]
+            done = step_res["done"]
+            system_msg = step_res.get("observation", {}).get("system_message", "")
+            total_reward = reward  
             
-        reward = step_res["reward"]
-        done = step_res["done"]
-        system_msg = step_res.get("observation", {}).get("system_message", "")
-        total_reward = reward  
-        
-        history.append(f"Used '{action_data['command']}'. Result: {system_msg}")
+            history.append(f"Used '{action_data['command']}'. Result: {system_msg}")
+            
+        except Exception as e:
+            print(f"Error: Step failed. {e}")
+            break
         
     print(f"END {task_id} Score: {total_reward}")
 
 if __name__ == "__main__":
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-    for t in ["task_refund", "task_reject_outdated", "escalation"]:
-        run_task(t, client)
+    try:
+        for t in ["task_refund", "task_reject_outdated", "escalation"]:
+            run_task(t)
+    except Exception as fatal_error:
+        print(f"Fatal execution error safely caught: {fatal_error}")
