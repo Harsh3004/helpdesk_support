@@ -1,7 +1,6 @@
 """
 Inference Script for Helpdesk Support Environment - Zero Dependency Version
 """
-
 import os
 import json
 import urllib.request
@@ -20,6 +19,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 ENV_URL = os.getenv("ENV_URL", "http://127.0.0.1:7860")
 
 def call_llm_api(prompt: str) -> str:
+    """Makes a direct REST API call without needing the openai package."""
     url = f"{API_BASE_URL}/chat/completions"
     
     headers = {
@@ -45,19 +45,18 @@ def call_llm_api(prompt: str) -> str:
             result = json.loads(response.read().decode('utf-8'))
             return result['choices'][0]['message']['content']
     except Exception as e:
-        print(f"LLM API Error: {e}")
         return ""
 
 def run_task(task_id: str):
-    print(f"START {task_id}")
+    # STRICT LOG: [START] 
+    print(f"[START] task={task_id}", flush=True)
     
     try:
         req = urllib.request.Request(f"{ENV_URL}/reset?task_id={task_id}", method="POST")
         with urllib.request.urlopen(req, timeout=10) as response:
             res = json.loads(response.read().decode('utf-8'))
     except Exception as e:
-        print(f"Error: Could not connect to environment for {task_id}. {e}")
-        print(f"END {task_id} Score: 0.0")
+        print(f"[END] task={task_id} score=0.0 steps=0", flush=True)
         return
 
     ticket_content = res.get("ticket_content", "")
@@ -85,14 +84,11 @@ def run_task(task_id: str):
         try:
             response_text = response_text.replace("```json", "").replace("```", "").strip()
             action_data = json.loads(response_text)
-            
             if "args" not in action_data:
                 action_data["args"] = {}
         except Exception:
             action_data = {"command": "reply", "args": {"text": "System error."}}
             
-        print(f"STEP {step} Action: {action_data.get('command', 'unknown')}")
-        
         try:
             data = json.dumps(action_data).encode('utf-8')
             req = urllib.request.Request(f"{ENV_URL}/step", data=data, headers={'Content-Type': 'application/json'}, method="POST")
@@ -100,6 +96,7 @@ def run_task(task_id: str):
                 step_res = json.loads(response.read().decode('utf-8'))
                 
             if "reward" not in step_res:
+                print(f"[STEP] step={step} reward=0.0", flush=True)
                 break
                 
             reward = step_res["reward"]
@@ -107,17 +104,21 @@ def run_task(task_id: str):
             system_msg = step_res.get("observation", {}).get("system_message", "")
             total_reward = reward  
             
-            history.append(f"Used '{action_data['command']}'. Result: {system_msg}")
+            # STRICT LOG: [STEP]
+            print(f"[STEP] step={step} reward={reward}", flush=True)
+            
+            history.append(f"Used '{action_data.get('command')}'. Result: {system_msg}")
             
         except Exception as e:
-            print(f"Error: Step failed. {e}")
+            print(f"[STEP] step={step} reward=0.0", flush=True)
             break
         
-    print(f"END {task_id} Score: {total_reward}")
+    # STRICT LOG: [END]
+    print(f"[END] task={task_id} score={total_reward} steps={step}", flush=True)
 
 if __name__ == "__main__":
     try:
         for t in ["task_refund", "task_reject_outdated", "escalation"]:
             run_task(t)
     except Exception as fatal_error:
-        print(f"Fatal execution error safely caught: {fatal_error}")
+        pass
