@@ -1,12 +1,11 @@
 """
 Inference Script for Helpdesk Support Environment
-=================================================
-This script connects an LLM to the local OpenEnv API.
 """
 
 import os
-import requests
 import json
+import urllib.request
+import urllib.error
 from openai import OpenAI
 
 try:
@@ -15,22 +14,20 @@ try:
 except ImportError:
     pass
 
-# OpenEnv Competition Variables
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Meta-Llama-3-8B-Instruct")
-
-# Pointing to our local FastAPI server
-ENV_URL = "http://127.0.0.1:7860"
+ENV_URL = os.getenv("ENV_URL", "http://127.0.0.1:7860")
 
 def run_task(task_id: str, client: OpenAI):
     print(f"\n{'='*40}\nStarting Task: {task_id}\n{'='*40}")
     
-    # 1. Resetting the environment and getting the first ticket
     try:
-        res = requests.post(f"{ENV_URL}/reset?task_id={task_id}").json()
-    except requests.exceptions.ConnectionError:
-        print("ERROR: Could not connect to the environment. Is your FastAPI server running?")
+        req = urllib.request.Request(f"{ENV_URL}/reset?task_id={task_id}", method="POST")
+        with urllib.request.urlopen(req) as response:
+            res = json.loads(response.read().decode('utf-8'))
+    except Exception as e:
+        print(f"Connection Error. Is the FastAPI server running? Error: {e}")
         return
 
     ticket_content = res.get("ticket_content", "")
@@ -44,7 +41,6 @@ def run_task(task_id: str, client: OpenAI):
     while not done and step < 5:
         step += 1
         
-        # 2. Building the prompt for the LLM
         prompt = (
             f"You are a Level 1 Support Agent.\n"
             f"Customer Message: {ticket_content}\n"
@@ -56,23 +52,19 @@ def run_task(task_id: str, client: OpenAI):
             f"Respond STRICTLY in JSON format: {{\"command\": \"action_name\", \"args\": {{\"text\": \"your message\"}}}}"
         )
         
-        # 3. Calling the LLM
         try:
             completion = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=[
-                    {"role": "system", "content": "You are a helpful JSON-outputting support agent."},
+                    {"role": "system", "content": "You are a logical AI support agent. Always output valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"}
             )
             response_text = completion.choices[0].message.content
-            
-            # Sometimes smaller LLMs wrap JSON in markdown blocks. This strips them out safely.
             response_text = response_text.replace("```json", "").replace("```", "").strip()
             action_data = json.loads(response_text)
             
-            # --- Safety net in case the LLM forgets the 'args' dict ---
             if "args" not in action_data:
                 action_data["args"] = {}
                 
@@ -82,17 +74,23 @@ def run_task(task_id: str, client: OpenAI):
             
         print(f"Step {step} - Agent Action: {action_data['command']}")
         if action_data['command'] == 'reply':
-            print(f"Agent Reply Text: {action_data['args'].get('text', '')}")
+            print(f"Agent Reply Text: {action_data.get('args', {}).get('text', '')}")
         
-        # 4. Sending the action to our Environment
-        response = requests.post(f"{ENV_URL}/step", json=action_data)
-
         try:
-            step_res = response.json()
-        except Exception:
+            data = json.dumps(action_data).encode('utf-8')
+            req = urllib.request.Request(f"{ENV_URL}/step", data=data, headers={'Content-Type': 'application/json'}, method="POST")
+            with urllib.request.urlopen(req) as response:
+                step_res = json.loads(response.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            print(f"\nCRITICAL ERROR: Local Server returned an HTTP Error.")
+            print(f"Status Code: {e.code}")
+            print(f"Raw Output: {e.read().decode('utf-8')}")
+            break
+        except json.decoder.JSONDecodeError:
             print(f"\nCRITICAL ERROR: Local Server returned an invalid response.")
-            print(f"Status Code: {response.status_code}")
-            print(f"Raw Output: {response.text}")
+            break
+        except Exception as e:
+            print(f"\nAPI Error: {e}")
             break
         
         if "reward" not in step_res:
@@ -101,19 +99,16 @@ def run_task(task_id: str, client: OpenAI):
             
         reward = step_res["reward"]
         done = step_res["done"]
-        system_msg = step_res["observation"]["system_message"]
-        
+        system_msg = step_res.get("observation", {}).get("system_message", "")
         total_reward = reward  
+        
         history.append(f"Used '{action_data['command']}'. Result: {system_msg}")
-
+        
     print(f"\nTask {task_id} Finished.")
-    print(f"Final Status: {step_res['info']['ticket_status']}")
+    print(f"Final Status: {step_res.get('info', {}).get('ticket_status', 'unknown')}")
     print(f"Final Score: {total_reward} / 1.0")
 
 if __name__ == "__main__":
-    # Initializing the OpenAI client
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-    
-    tasks = ["task_refund", "task_reject_outdated", "escalation"]
-    for t in tasks:
+    for t in ["task_refund", "task_reject_outdated", "escalation"]:
         run_task(t, client)
