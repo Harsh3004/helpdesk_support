@@ -1,8 +1,9 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
-from server.graders import evaluate_task
+from typing import Dict, Any, List
+import random
 import uvicorn
+from server.graders import evaluate_task
 
 app = FastAPI()
 
@@ -17,96 +18,159 @@ class StepResponse(BaseModel):
     done: bool
     info: Dict[str, Any]
 
-# 2. Database & State
-MOCK_CRM_DB = {
-    "task_refund": {"account_age": "3 years", "last_charge": "Duplicate $29.99 detected today", "policy": "Standard"},
-    "task_reject_outdated": {"account_age": "2 years", "last_charge": "2 years ago", "policy": "No refunds after 30 days"},
-    "escalation": {"account_age": "5 years", "last_charge": "Yesterday", "alert": "HIGH RISK - Legal threat detected"}
+# 2. Enterprise Database & 8 Scenarios
+SCENARIOS = {
+    "duplicate_charge": {
+        "ticket": "I was charged $29.99 twice on the 1st.",
+        "crm": {"account_age": "3 years", "tier": "premium"},
+        "stripe": {"tx_count": 2, "amount": 29.99, "status": "settled"},
+        "jira": {"active_outages": "none"},
+        "auth0": {"ip_match": True, "risk": "low"},
+        "true_verdict": "issue_refund"
+    },
+    "outdated_refund": {
+        "ticket": "I want a refund for my lifetime license from 2023.",
+        "crm": {"account_age": "2 years", "tier": "standard", "policy": "30-day max"},
+        "stripe": {"tx_count": 1, "date": "2023-05-12"},
+        "jira": {"active_outages": "none"},
+        "auth0": {"ip_match": True, "risk": "low"},
+        "true_verdict": "reply_reject"
+    },
+    "account_takeover": {
+        "ticket": "RESET MY PASSWORD NOW I CANNOT LOG IN AND MY BILLING IS WRONG.",
+        "crm": {"account_age": "5 years", "tier": "enterprise"},
+        "stripe": {"tx_count": 5, "recent_failures": True},
+        "jira": {"active_outages": "none"},
+        "auth0": {"ip_match": False, "risk": "CRITICAL - VPN DETECTED"},
+        "true_verdict": "escalate_t2"
+    },
+    "service_outage": {
+        "ticket": "The API is down! I'm losing money. Fix it or refund me for the month.",
+        "crm": {"account_age": "1 month", "tier": "startup"},
+        "stripe": {"status": "paid"},
+        "jira": {"active_outages": "API_GATEWAY_DOWN", "eta": "2 hours"},
+        "auth0": {"ip_match": True, "risk": "low"},
+        "true_verdict": "apply_credit"
+    },
+    "legal_threat": {
+        "ticket": "Your software deleted my database. My lawyer is drafting a lawsuit for $50,000.",
+        "crm": {"account_age": "4 years", "tier": "premium"},
+        "stripe": {"status": "paid"},
+        "jira": {"active_outages": "none"},
+        "auth0": {"ip_match": True, "risk": "low"},
+        "true_verdict": "escalate_legal"
+    },
+    "feature_request": {
+        "ticket": "Can you add a dark mode to the dashboard?",
+        "crm": {"account_age": "1 year", "tier": "free"},
+        "stripe": {"status": "none"},
+        "jira": {"active_outages": "none"},
+        "auth0": {"ip_match": True, "risk": "low"},
+        "true_verdict": "reply_resolved"
+    },
+    "unrecognized_charge": {
+        "ticket": "Who are you? I have a charge for $99 on my card from your company!",
+        "crm": {"account_found": False},
+        "stripe": {"tx_count": 1, "amount": 99.00, "name_mismatch": True},
+        "jira": {"active_outages": "none"},
+        "auth0": {"ip_match": False, "risk": "HIGH"},
+        "true_verdict": "escalate_t2"
+    },
+    "missing_delivery": {
+        "ticket": "I bought the physical security key but it never arrived in the mail.",
+        "crm": {"account_age": "6 months", "tier": "standard"},
+        "stripe": {"status": "paid"},
+        "jira": {"active_outages": "none"},
+        "auth0": {"ip_match": True, "risk": "low"},
+        "true_verdict": "request_info"
+    }
 }
 
-TICKETS = {
-    "task_refund": "Hi Support, I just checked my credit card statement and I was charged $29.99 twice on the 1st of the month. Can you please refund the duplicate charge?",
-    "task_reject_outdated": "Hello, I purchased a lifetime license for your software 2 years ago. I don't really use it anymore. Please issue a full refund to my original payment method.",
-    "escalation": "YOUR UPDATE DELETED MY ENTIRE PROJECT DATABASE!! I DEMAND A FULL REFUND PLUS $500 FOR THE HOURS OF WORK I LOST! IF YOU DON'T FIX THIS I AM INVOLVING MY LAWYER. GET ME A MANAGER NOW!"
-}
-
-env_state = {
-    "current_task": None,
-    "step_count": 0,
-    "ticket_status": "open",
-    "refund_issued": False,
-    "reply_sent": "",
-    "escalated": False,
-    "crm_checked": False
-}
+env_state = {}
 
 # 3. API Endpoints
 @app.post("/reset")
-def reset(task_id: str = "task_refund"):
+def reset(task_id: str = "random"):
     global env_state
     
-    if not task_id:
-        task_id = "task_refund"
-
+    if task_id == "random" or task_id not in SCENARIOS:
+        task_id = random.choice(list(SCENARIOS.keys()))
+        
     env_state = {
         "current_task": task_id,
         "step_count": 0,
         "ticket_status": "open",
-        "refund_issued": False,
-        "reply_sent": "",
-        "escalated": False,
-        "crm_checked": False
+        "action_history": [],
+        "revealed_info": {},
+        "final_action": None
     }
-    return {"ticket_content": TICKETS.get(task_id, "Unknown ticket.")}
+    return {"ticket_content": SCENARIOS[task_id]["ticket"], "task_id": task_id}
 
 @app.post("/step", response_model=StepResponse)
 def step(action: Action):
     global env_state
     env_state["step_count"] += 1
-    reward = 0.0
-    system_msg = "Action executed."
+    task = SCENARIOS[env_state["current_task"]]
+    cmd = action.command
     
-    # Process actions
-    if action.command == "query_crm":
-        env_state["crm_checked"] = True
-        db_record = MOCK_CRM_DB.get(env_state["current_task"], {})
-        system_msg = f"CRM DATA RETRIEVED: {db_record}"
-        reward += 0.3
-    elif action.command == "issue_refund":
-        env_state["refund_issued"] = True
-        system_msg = "Refund API called successfully."
-        reward += 0.1 
-    elif action.command == "reply":
-        env_state["reply_sent"] = action.args.get("text", "")
+    system_msg = ""
+    
+    # 10 ENTERPRISE ACTIONS
+    if cmd == "query_crm":
+        system_msg = f"CRM Data: {task['crm']}"
+        env_state["revealed_info"]["crm"] = True
+    elif cmd == "check_stripe":
+        system_msg = f"Stripe Gateway: {task['stripe']}"
+        env_state["revealed_info"]["stripe"] = True
+    elif cmd == "check_jira":
+        system_msg = f"Jira Engineering Status: {task['jira']}"
+        env_state["revealed_info"]["jira"] = True
+    elif cmd == "verify_identity":
+        system_msg = f"Auth0 Security Log: {task['auth0']}"
+        env_state["revealed_info"]["auth0"] = True
+    elif cmd == "request_info":
+        system_msg = "Requested additional information from customer."
+        env_state["final_action"] = "request_info"
+        env_state["ticket_status"] = "pending_customer"
+    elif cmd == "issue_refund":
+        system_msg = "Refund successfully processed via Stripe API."
+        env_state["final_action"] = "issue_refund"
         env_state["ticket_status"] = "closed"
-        system_msg = "Reply sent to customer."
-    elif action.command == "escalate":
-        env_state["escalated"] = True
+    elif cmd == "apply_credit":
+        system_msg = "Account credited for 1 free month."
+        env_state["final_action"] = "apply_credit"
+        env_state["ticket_status"] = "closed"
+    elif cmd == "reply":
+        system_msg = "Message sent to customer."
+        env_state["final_action"] = "reply_reject" if "reject" in action.args.get("text", "").lower() else "reply_resolved"
+        env_state["ticket_status"] = "closed"
+    elif cmd == "escalate_tier2":
+        system_msg = "Ticket routed to Tier 2 Technical/Fraud Support."
+        env_state["final_action"] = "escalate_t2"
         env_state["ticket_status"] = "escalated"
-        system_msg = "Ticket escalated to Tier 2."
+    elif cmd == "escalate_legal":
+        system_msg = "Ticket routed to Legal & Compliance."
+        env_state["final_action"] = "escalate_legal"
+        env_state["ticket_status"] = "escalated"
     else:
-        system_msg = f"Unknown command '{action.command}'."
-        reward -= 0.1
+        system_msg = f"Unknown command: {cmd}"
+
+    env_state["action_history"].append(cmd)
 
     # Grade the step
-    score, done = evaluate_task(env_state["current_task"], env_state)
+    score, done = evaluate_task(task, env_state)
     
-    if done:
-        reward = score  
-    elif env_state["step_count"] >= 5:
+    if env_state["step_count"] >= 8:
         done = True
-        reward = score  
 
     return StepResponse(
-        observation={"system_message": system_msg},
-        reward=reward,
+        observation={"system_message": system_msg, "revealed_info": env_state["revealed_info"]},
+        reward=score if done else 0.0, # Give reward only at the end to force RL planning
         done=done,
         info={"ticket_status": env_state["ticket_status"]}
     )
 
-# 4. OpenEnv Validation Entry Point
 def main():
-    """Entry point for the OpenEnv validator and multi-mode deployment."""
     uvicorn.run("server.app:app", host="0.0.0.0", port=7860, reload=False)
 
 if __name__ == "__main__":
