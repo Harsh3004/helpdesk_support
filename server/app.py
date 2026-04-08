@@ -92,9 +92,10 @@ def step(action: Action):
     score, done = evaluate_task(env_state["current_task"], env_state)
     
     if done:
-        reward += score
+        reward = score  
     elif env_state["step_count"] >= 5:
         done = True
+        reward = score  
 
     return StepResponse(
         observation={"system_message": system_msg},
