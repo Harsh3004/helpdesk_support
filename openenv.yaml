@@ -1,16 +1,17 @@
-name: "helpdesk_support"
-version: "1.0.0"
-description: "An environment where an agent acts as a Level 1 Support Engineer managing tickets and billing operations."
-entrypoint: "server.app:app"
-port: 7860
-
-tasks:
-  - id: "task_refund"
-    difficulty: "easy"
-    description: "Successfully categorize and issue a full refund for a standard duplicate charge request."
-  - id: "task_reject_outdated"
-    difficulty: "medium"
-    description: "Deny a refund based on company policy (outside 30-day window) and reply politely."
-  - id: "escalation"
-    difficulty: "hard"
-    description: "Handle a multi-turn angry customer, do NOT issue a refund for damages, and escalate to humans."
+name: enterprise_support_v2
+version: 2.0.0
+description: Professional Tier Support Environment with Session Isolation
+hackathon:
+  statement: "3.1 - Professional Tasks (World Modeling)"
+  partner: "Scaler AI Labs"
+environment:
+  type: professional_task
+  partial_observability: true
+actions:
+  - query_crm
+  - check_stripe
+  - verify_identity
+  - check_outages
+  - approve_refund
+  - deny_request
+  - escalate
